@@ -19,13 +19,7 @@
 
 package org.apache.ranger.authorization.kafka.authorizer;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Date;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.stream.Collectors;
@@ -51,6 +45,7 @@ import org.apache.kafka.server.authorizer.AuthorizationResult;
 import org.apache.kafka.server.authorizer.Authorizer;
 import org.apache.kafka.server.authorizer.AuthorizerServerInfo;
 import org.apache.ranger.audit.provider.MiscUtil;
+import org.apache.ranger.authorization.hadoop.config.RangerPluginConfig;
 import org.apache.ranger.plugin.policyengine.RangerAccessRequest;
 import org.apache.ranger.plugin.policyengine.RangerAccessRequestImpl;
 import org.apache.ranger.plugin.policyengine.RangerAccessResourceImpl;
@@ -199,23 +194,54 @@ public class RangerKafkaAuthorizer implements Authorizer {
       synchronized (RangerKafkaAuthorizer.class) {
         me = rangerPlugin;
         if (me == null) {
-          try {
-            // Possible to override JAAS configuration which is used by Ranger, otherwise
-            // SASL_PLAINTEXT is used, which force Kafka to use 'sasl_plaintext.KafkaServer',
-            // if it's not defined, then it reverts to 'KafkaServer' configuration.
-            final Object jaasContext = configs.get("ranger.jaas.context");
-            final String listenerName = (jaasContext instanceof String
-                && StringUtils.isNotEmpty((String) jaasContext)) ? (String) jaasContext
-                : SecurityProtocol.SASL_PLAINTEXT.name();
-            final String saslMechanism = SaslConfigs.GSSAPI_MECHANISM;
-            JaasContext context = JaasContext.loadServerContext(new ListenerName(listenerName), saslMechanism, configs);
-            MiscUtil.setUGIFromJAASConfig(context.name());
-            UserGroupInformation loginUser = MiscUtil.getUGILoginUser();
-            logger.info("LoginUser={}", loginUser);
-          } catch (Throwable t) {
-            logger.error("Error getting principal.", t);
+          String serviceName = (String) configs.get("ranger.plugin.kafka.service.name");
+          if (StringUtils.isEmpty(serviceName)) {
+            RangerPluginConfig installConfig = new RangerPluginConfig("kafka", null, "kafka", null, null, null);
+            serviceName = installConfig.getServiceName();
+            if (StringUtils.isEmpty(serviceName)) {
+              serviceName = "default-kafka-service";
+              logger.error("'ranger.plugin.kafka.service.name' not found in server.properties. Using fallback name: " + serviceName);
+            }
           }
-          rangerPlugin = new RangerBasePlugin("kafka", "kafka");
+          rangerPlugin = new RangerBasePlugin("kafka", serviceName, "kafka");
+          RangerPluginConfig pluginConfig = rangerPlugin.getConfig();
+
+          logger.debug("Injecting Ranger properties from server.properties...");
+          for (Map.Entry<String, ?> entry : configs.entrySet()) {
+            String key = entry.getKey();
+            if (key != null && key.startsWith("ranger.plugin.")) {
+              String value = entry.getValue() != null ? entry.getValue().toString() : null;
+              if (value != null) {
+                pluginConfig.set(key, value);
+                logger.debug("==> Injected Ranger config: {}={}", key, value);
+              }
+            }
+          }
+
+          // Check if Kerberos is configured by looking for the Kerberos service principal name.
+          // This is a reliable indicator that we are in a Kerberos environment.
+          Object kerberosServicePrincipal = configs.get(SaslConfigs.SASL_KERBEROS_SERVICE_NAME);
+          boolean isKerberosEnabled = kerberosServicePrincipal != null && !kerberosServicePrincipal.toString().trim().isEmpty();
+          if (isKerberosEnabled) {
+            try {
+              // Possible to override JAAS configuration which is used by Ranger, otherwise
+              // SASL_PLAINTEXT is used, which force Kafka to use 'sasl_plaintext.KafkaServer',
+              // if it's not defined, then it reverts to 'KafkaServer' configuration.
+              final Object jaasContext = configs.get("ranger.jaas.context");
+              final String listenerName = (jaasContext instanceof String
+                  && StringUtils.isNotEmpty((String) jaasContext)) ? (String) jaasContext
+                  : SecurityProtocol.SASL_PLAINTEXT.name();
+              final String saslMechanism = SaslConfigs.GSSAPI_MECHANISM;
+              JaasContext context = JaasContext.loadServerContext(new ListenerName(listenerName), saslMechanism, configs);
+              MiscUtil.setUGIFromJAASConfig(context.name());
+              UserGroupInformation loginUser = MiscUtil.getUGILoginUser();
+              logger.info("LoginUser={}", loginUser);
+            } catch (Throwable t) {
+              logger.error("Error getting principal.", t);
+            }
+          } else {
+            logger.info("Kerberos (GSSAPI) is not enabled. Skipping Ranger plugin's UGI initialization.");
+          }
           logger.info("Calling plugin.init()");
           rangerPlugin.init();
           auditHandler = new RangerKafkaAuditHandler();
@@ -254,7 +280,12 @@ public class RangerKafkaAuthorizer implements Authorizer {
       return Collections.emptyList();
     }
     String userName = requestContext.principal() == null ? null : requestContext.principal().getName();
-    Set<String> userGroups = MiscUtil.getGroupsForRequestUser(userName);
+    RangerPluginConfig config = rangerPlugin.getConfig();
+    boolean useOnlyRangerGroups = config.getBoolean(config.getPropertyPrefix() + ".use.only.rangerGroups", false);
+    Set<String> userGroups = new java.util.HashSet<>();
+    if (!useOnlyRangerGroups) {
+      userGroups = MiscUtil.getGroupsForRequestUser(userName);
+    }
     String hostAddress = requestContext.clientAddress() == null ? null : requestContext.clientAddress().getHostAddress();
     String ip = StringUtils.isNotEmpty(hostAddress) && hostAddress.charAt(0) == '/' ? hostAddress.substring(1) : hostAddress;
     Date eventTime = new Date();
