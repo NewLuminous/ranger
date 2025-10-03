@@ -89,6 +89,30 @@ Ranger is built using [Apache Maven](https://maven.apache.org/). To run Ranger:
    ranger-<version>-elasticsearch-plugin.tar.gz
    ```
 
+## Building a Specific Ranger Plugin
+
+In many cases, you may only need to build a single plugin (like the Kafka plugin) and its dependencies, which is significantly faster than building the entire Ranger project. You can achieve this using Maven profiles.
+
+The example below shows how to build only the `ranger-kafka-plugin`. This process is useful for creating a patched or custom version of a specific plugin.
+
+1. Check out the code from the GIT repository.
+
+2. On the root folder, execute the following Maven command:
+
+   ```bash
+   mvn clean install -DskipTests=true -P ranger-kafka-plugin
+   ```
+   * `-DskipTests=true`: Skips running unit and integration tests, which greatly speeds up the build.
+   * `-P ranger-kafka-plugin`: Activates a specific Maven profile that builds only the Kafka plugin and its required modules. Profiles for other plugins (e.g., `ranger-hdfs-plugin`, `ranger-hive-plugin`) are also available.
+
+3. After the build completes, the necessary TAR file will be available in the `target` directory:
+
+   ```
+   ranger-<version>-kafka-plugin.tar.gz
+   ```
+
+   This TAR file contains all the JARs needed to deploy the plugin and can be installed following the standard deployment process.
+
 ## Importing Apache Ranger Project into Eclipse
 
 1. Create an Eclipse workspace called 'ranger'
